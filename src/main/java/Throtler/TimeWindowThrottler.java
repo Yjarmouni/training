@@ -1,57 +1,73 @@
 package Throtler;
 
+import java.util.ArrayDeque;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class TimeWindowThrottler implements Throttler{
     NoticationConsumer subscriber;
-    private long lastProceedTime;
+    private final ArrayDeque<Long> lastPublicationTimeStamps;
     private final long timeIntervalInMillis;
+    private final int allowedPublicationsCount;
+    private boolean isNotificationScheduled;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
 
 
-    public TimeWindowThrottler(long timeIntervalInMillis) {
+    public TimeWindowThrottler(long timeIntervalInMillis, int allowedPubs) {
         this.timeIntervalInMillis = timeIntervalInMillis;
+        this.allowedPublicationsCount = allowedPubs;
+        lastPublicationTimeStamps = new ArrayDeque<>();
     }
 
     @Override
     public synchronized ThrottleResult shouldProceed() {
-        long currentTime = System.currentTimeMillis();
-        try {
-            if (currentTime - lastProceedTime >= timeIntervalInMillis) {
-                lastProceedTime = System.currentTimeMillis();
-                return ThrottleResult.PROCEED;
-            } else {
-                return ThrottleResult.DO_NOT_PROCEED;
-            }
-        } finally {
-            checkAndNotify();
+        cleanTimeStamps();
+        if (lastPublicationTimeStamps.size() >= allowedPublicationsCount ) {
+            scheduleNotificationIfNeeded();
+            return ThrottleResult.DO_NOT_PROCEED;
+        } else {
+            var now = System.currentTimeMillis();
+            lastPublicationTimeStamps.add(now);// assuming a positive 'should proceed' means a publication
+            return ThrottleResult.PROCEED;
+        }
+    }
+
+    private synchronized void scheduleNotificationIfNeeded() {
+        long now = System.currentTimeMillis();
+        if (lastPublicationTimeStamps.size() >= allowedPublicationsCount && !isNotificationScheduled){
+            isNotificationScheduled = true;
+            long oldest = lastPublicationTimeStamps.getFirst();
+            long elapsed = now - oldest;
+            long delay = timeIntervalInMillis - elapsed;
+            scheduler.schedule(this::runScheduledTask, delay, TimeUnit.MILLISECONDS);
+        }
+    }
+    private synchronized void runScheduledTask(){
+        isNotificationScheduled = false;
+        cleanTimeStamps();
+        if(subscriber==null)
+            return;// no subscriber yet ==> log this
+        if (lastPublicationTimeStamps.size() < allowedPublicationsCount){
+            subscriber.onNotification();
+        } else {
+            scheduleNotificationIfNeeded();
+        }
+    }
+
+    private void cleanTimeStamps() {
+        long now = System.currentTimeMillis();
+        while (!lastPublicationTimeStamps.isEmpty() && (lastPublicationTimeStamps.getFirst() + timeIntervalInMillis ) <= now){
+            lastPublicationTimeStamps.removeFirst();
         }
     }
 
     @Override
     public void notifyWhenCanProceed(NoticationConsumer subscriber) {
         this.subscriber = subscriber;
-        checkAndNotify();
-    }
-
-    private void checkAndNotify() {
-        long currentTime = System.currentTimeMillis();
-        long timeSinceLastProceed = currentTime - lastProceedTime;
-        long timeTowait;
-        if (timeSinceLastProceed >= timeIntervalInMillis) {
-
-            scheduler.execute(subscriber::onNotification);
-            return;
-        } else {
-            timeTowait = timeIntervalInMillis - timeSinceLastProceed;
+        cleanTimeStamps();
+        if (lastPublicationTimeStamps.size() >= allowedPublicationsCount ) {
+            scheduleNotificationIfNeeded();
         }
-        scheduler.schedule(() -> {
-            synchronized (this) {
-                lastProceedTime = System.currentTimeMillis();
-            }
-            subscriber.onNotification();
-        }, timeTowait, TimeUnit.MILLISECONDS);
     }
 }

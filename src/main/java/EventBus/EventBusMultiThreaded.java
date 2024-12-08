@@ -2,6 +2,7 @@ package EventBus;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -9,7 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
 public class EventBusMultiThreaded  implements  ConflatingEventBus{
-    private final List<EventBusMultiThreaded.Subscriber<?>> subscribers = new ArrayList<>();
+    private final List<EventBusMultiThreaded.Subscriber<?>> subscribers = new CopyOnWriteArrayList<>();
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
     @Override
@@ -26,27 +27,23 @@ public class EventBusMultiThreaded  implements  ConflatingEventBus{
             subscriber.latestEvent.set(o);
             handleConflatedEvent(subscriber);
         } else {
-            executor.submit(()-> {
-               subscriber.callback.consume(o);
-            });
+            executor.submit(()-> subscriber.callback.consume(o));
         }
     }
 
     private void handleConflatedEvent(Subscriber<?> subscriber) {
         if(subscriber.isProcessing.compareAndSet(false, true)){
             executor.submit(()-> {
-                try{
+                do {
                     Object event;
-                    while((event = subscriber.latestEvent.getAndSet(null)) != null){
+                    while ((event = subscriber.latestEvent.getAndSet(null)) != null) {
                         subscriber.callback.consume(event);
                     }
-                } finally {
                     subscriber.isProcessing.set(false);
-                }
 
+                } while (subscriber.latestEvent.get() != null && subscriber.isProcessing.compareAndSet(false, true));
             });
         }
-
     }
 
     private <T> boolean shouldPublish(Object o, EventBusMultiThreaded.Subscriber<?> subscriber) {
